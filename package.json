@@ -1,12 +1,14 @@
 {
   "name": "ffmpeg-extract-audio",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "description": "A powerful platform to extract audio out of videos for personal use, transcription and more.",
   "type": "module",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "cli": "node download.js",
+    "playlist": "node download.js --playlist",
+    "deps": "node download.js --check-deps",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [
@@ -16,7 +18,10 @@
     "download",
     "ffmpeg",
     "yt-dlp",
-    "converter"
+    "converter",
+    "playlist",
+    "progress",
+    "drag-drop"
   ],
   "author": "",
   "license": "MIT",

@@ -237,6 +237,164 @@ export function generateSafeFilename(url) {
 }
 
 /**
+ * File naming templates for different formats
+ */
+export const NAMING_TEMPLATES = {
+  DEFAULT: '{title} [{id}]',
+  ARTIST_TITLE: '{uploader} - {title}',
+  DATE_TITLE: '{upload_date} - {title}',
+  DURATION_TITLE: '{title} ({duration}s)',
+  PLAYLIST_INDEX: '{playlist_index:02d}. {title}',
+  CUSTOM: '{custom}'
+};
+
+/**
+ * Generate filename using a template
+ * @param {object} videoInfo - Video information object
+ * @param {string} template - Template string
+ * @param {string} customName - Custom name for CUSTOM template
+ * @returns {string} - Generated filename
+ */
+export function generateFilenameFromTemplate(videoInfo, template = NAMING_TEMPLATES.DEFAULT, customName = '') {
+  const {
+    title = 'Unknown',
+    id = 'unknown',
+    uploader = 'Unknown',
+    upload_date = 'unknown',
+    duration = 0,
+    playlist_index = 0
+  } = videoInfo;
+
+  let filename = template;
+
+  // Replace template variables
+  const replacements = {
+    '{title}': sanitizeFilename(title),
+    '{id}': id,
+    '{uploader}': sanitizeFilename(uploader),
+    '{upload_date}': upload_date,
+    '{duration}': Math.round(duration || 0),
+    '{playlist_index:02d}': String(playlist_index).padStart(2, '0'),
+    '{custom}': sanitizeFilename(customName)
+  };
+
+  for (const [placeholder, value] of Object.entries(replacements)) {
+    filename = filename.replace(new RegExp(placeholder.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'g'), value);
+  }
+
+  // Clean up any remaining brackets and extra spaces
+  filename = filename.replace(/\{[^}]*\}/g, '').replace(/\s+/g, ' ').trim();
+  
+  // Ensure we have a valid filename
+  if (!filename || filename.length < 1) {
+    filename = `download_${id}`;
+  }
+
+  return filename;
+}
+
+/**
+ * Progress tracking utility for downloads
+ */
+export class ProgressTracker {
+  constructor() {
+    this.downloads = new Map();
+  }
+
+  /**
+   * Start tracking a download
+   * @param {string} id - Download ID
+   * @param {object} info - Initial info
+   */
+  startDownload(id, info = {}) {
+    this.downloads.set(id, {
+      id,
+      startTime: Date.now(),
+      status: 'starting',
+      progress: 0,
+      speed: 0,
+      eta: 0,
+      totalSize: 0,
+      downloadedSize: 0,
+      ...info
+    });
+  }
+
+  /**
+   * Update download progress
+   * @param {string} id - Download ID
+   * @param {object} update - Progress update
+   */
+  updateProgress(id, update) {
+    const download = this.downloads.get(id);
+    if (download) {
+      Object.assign(download, update, {
+        lastUpdate: Date.now()
+      });
+    }
+  }
+
+  /**
+   * Complete a download
+   * @param {string} id - Download ID
+   * @param {object} result - Final result
+   */
+  completeDownload(id, result = {}) {
+    const download = this.downloads.get(id);
+    if (download) {
+      download.status = 'completed';
+      download.endTime = Date.now();
+      download.duration = download.endTime - download.startTime;
+      Object.assign(download, result);
+    }
+  }
+
+  /**
+   * Mark download as failed
+   * @param {string} id - Download ID
+   * @param {string} error - Error message
+   */
+  failDownload(id, error) {
+    const download = this.downloads.get(id);
+    if (download) {
+      download.status = 'failed';
+      download.endTime = Date.now();
+      download.error = error;
+    }
+  }
+
+  /**
+   * Get download status
+   * @param {string} id - Download ID
+   * @returns {object|null} - Download status or null
+   */
+  getDownload(id) {
+    return this.downloads.get(id) || null;
+  }
+
+  /**
+   * Get all downloads
+   * @returns {Array} - Array of all downloads
+   */
+  getAllDownloads() {
+    return Array.from(this.downloads.values());
+  }
+
+  /**
+   * Clean up old completed downloads
+   * @param {number} maxAge - Max age in milliseconds (default: 1 hour)
+   */
+  cleanup(maxAge = 3600000) {
+    const now = Date.now();
+    for (const [id, download] of this.downloads.entries()) {
+      if (download.endTime && (now - download.endTime) > maxAge) {
+        this.downloads.delete(id);
+      }
+    }
+  }
+}
+
+/**
  * Rate limiting helper
  */
 export class RateLimiter {

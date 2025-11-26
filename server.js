@@ -1,6 +1,6 @@
 import express from 'express';
-import { extractAudio, checkDependencies, getVideoInfo } from './audioExtractor.js';
-import { validateAndSanitizeYouTubeURL, RateLimiter, validateApiInput } from './utils.js';
+import { extractAudio, checkDependencies, getVideoInfo, extractPlaylistAudio, getPlaylistInfo } from './audioExtractor.js';
+import { validateAndSanitizeYouTubeURL, RateLimiter, validateApiInput, NAMING_TEMPLATES, generateFilenameFromTemplate, ProgressTracker } from './utils.js';
 import { handleError, logError } from './errorHandler.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -45,8 +45,14 @@ function rateLimitMiddleware(limiter, errorMessage = 'Too many requests') {
   };
 }
 
-// Store active downloads (in memory for simplicity)
+// Store active downloads and progress tracker
 const activeDownloads = new Map();
+const progressTracker = new ProgressTracker();
+
+// Cleanup old downloads every hour
+setInterval(() => {
+  progressTracker.cleanup();
+}, 3600000);
 
 /**
  * Serves the main HTML interface
@@ -70,9 +76,6 @@ app.get('/', (req, res) => {
             font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
             background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
             min-height: 100vh;
-            display: flex;
-            align-items: center;
-            justify-content: center;
             padding: 20px;
         }
 
@@ -81,8 +84,8 @@ app.get('/', (req, res) => {
             border-radius: 20px;
             box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
             padding: 40px;
-            max-width: 600px;
-            width: 100%;
+            max-width: 800px;
+            margin: 0 auto;
             text-align: center;
         }
 
@@ -103,9 +106,41 @@ app.get('/', (req, res) => {
             font-size: 1.1rem;
         }
 
+        .tabs {
+            display: flex;
+            margin-bottom: 30px;
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 5px;
+        }
+
+        .tab {
+            flex: 1;
+            padding: 12px 20px;
+            border: none;
+            background: transparent;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .tab.active {
+            background: #667eea;
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+            text-align: left;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
         .form-group {
             margin-bottom: 25px;
-            text-align: left;
         }
 
         label {
@@ -115,7 +150,7 @@ app.get('/', (req, res) => {
             font-weight: 600;
         }
 
-        input[type="url"] {
+        input, select {
             width: 100%;
             padding: 15px;
             border: 2px solid #e0e0e0;
@@ -124,10 +159,29 @@ app.get('/', (req, res) => {
             transition: border-color 0.3s ease;
         }
 
-        input[type="url"]:focus {
+        input:focus, select:focus {
             outline: none;
             border-color: #667eea;
             box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.1);
+        }
+
+        .drag-drop-area {
+            border: 3px dashed #ccc;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 20px;
+            transition: all 0.3s ease;
+            cursor: pointer;
+        }
+
+        .drag-drop-area.dragover {
+            border-color: #667eea;
+            background: rgba(102, 126, 234, 0.05);
+        }
+
+        .drag-drop-area:hover {
+            border-color: #667eea;
         }
 
         .btn {
@@ -141,6 +195,7 @@ app.get('/', (req, res) => {
             cursor: pointer;
             transition: transform 0.2s ease;
             width: 100%;
+            margin: 10px 0;
         }
 
         .btn:hover:not(:disabled) {
@@ -152,11 +207,41 @@ app.get('/', (req, res) => {
             cursor: not-allowed;
         }
 
+        .btn.secondary {
+            background: #6c757d;
+        }
+
+        .progress-container {
+            margin: 20px 0;
+            display: none;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #e0e0e0;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+
+        .progress-bar-fill {
+            height: 100%;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .progress-text {
+            margin-top: 10px;
+            font-size: 14px;
+            color: #666;
+            text-align: center;
+        }
+
         .status {
             margin-top: 25px;
             padding: 20px;
             border-radius: 10px;
-            min-height: 60px;
             display: none;
         }
 
@@ -178,7 +263,7 @@ app.get('/', (req, res) => {
             color: #0c5460;
         }
 
-        .video-info {
+        .video-info, .playlist-info {
             background: #f8f9fa;
             border-radius: 10px;
             padding: 20px;
@@ -187,81 +272,76 @@ app.get('/', (req, res) => {
             display: none;
         }
 
-        .video-info h3 {
+        .video-info h3, .playlist-info h3 {
             color: #333;
             margin-bottom: 10px;
         }
 
-        .video-info p {
-            margin: 5px 0;
-            color: #666;
+        .playlist-item {
+            background: white;
+            border-radius: 8px;
+            padding: 15px;
+            margin: 10px 0;
+            border-left: 4px solid #667eea;
+        }
+
+        .download-history {
+            background: #f8f9fa;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 30px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+
+        .history-item {
+            background: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            display: flex;
+            justify-content: between;
+            align-items: center;
+        }
+
+        .history-item .title {
+            flex: 1;
+            font-weight: 600;
+        }
+
+        .history-item .status {
+            padding: 5px 10px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
         }
 
         .disclaimer {
             background: #fff3cd;
             border: 1px solid #ffeaa7;
-            border-radius: 10px;
+            color: #856404;
             padding: 20px;
+            border-radius: 10px;
             margin-top: 30px;
-            color: #856404;
-        }
-
-        .disclaimer h3 {
-            margin-bottom: 10px;
-            color: #856404;
-        }
-
-        .loading {
-            display: inline-block;
-            width: 20px;
-            height: 20px;
-            border: 3px solid #f3f3f3;
-            border-top: 3px solid #667eea;
-            border-radius: 50%;
-            animation: spin 1s linear infinite;
-            margin-right: 10px;
-        }
-
-        @keyframes spin {
-            0% { transform: rotate(0deg); }
-            100% { transform: rotate(360deg); }
-        }
-
-        .examples {
-            background: #f8f9fa;
-            border-radius: 10px;
-            padding: 20px;
-            margin: 20px 0;
             text-align: left;
         }
 
-        .examples h3 {
-            color: #333;
-            margin-bottom: 15px;
-        }
-
-        .examples code {
-            background: #e9ecef;
-            padding: 3px 6px;
-            border-radius: 4px;
-            font-family: 'Courier New', monospace;
-            display: block;
-            margin: 5px 0;
-            word-break: break-all;
+        .disclaimer strong {
+            color: #d63031;
         }
 
         @media (max-width: 768px) {
             .container {
-                padding: 30px 20px;
+                padding: 20px;
                 margin: 10px;
             }
             
-            h1 {
-                font-size: 1.5rem;
+            .tabs {
+                flex-direction: column;
             }
             
-            .subtitle {
-                font-size: 1rem;
+            .tab {
+                margin: 2px 0;
             }
         }
     </style>
@@ -270,212 +350,484 @@ app.get('/', (req, res) => {
     <div class="container">
         <div class="logo">🎵</div>
         <h1>FFMPEG-EXTRACT-AUDIO</h1>
-        <p class="subtitle">Extract high-quality MP3 audio from YouTube videos</p>
+        <p class="subtitle">Convert YouTube videos and playlists to high-quality MP3 files</p>
+        
+        <div class="tabs">
+            <button class="tab active" onclick="showTab('single')">Single Video</button>
+            <button class="tab" onclick="showTab('playlist')">Playlist</button>
+            <button class="tab" onclick="showTab('settings')">Settings</button>
+        </div>
 
-        <form id="downloadForm">
-            <div class="form-group">
-                <label for="youtubeUrl">YouTube URL:</label>
-                <input 
-                    type="url" 
-                    id="youtubeUrl" 
-                    name="youtubeUrl" 
-                    placeholder="https://www.youtube.com/watch?v=..." 
-                    required
-                >
+        <!-- Single Video Tab -->
+        <div id="single-tab" class="tab-content active">
+            <div class="drag-drop-area" id="dragDropArea" onclick="document.getElementById('urlInput').focus()">
+                <div>📎</div>
+                <p><strong>Drag & Drop a YouTube URL here</strong></p>
+                <p>or paste it in the input below</p>
             </div>
             
-            <button type="submit" class="btn" id="downloadBtn">
-                Download MP3
-            </button>
-        </form>
+            <div class="form-group">
+                <label for="urlInput">YouTube Video URL:</label>
+                <input type="url" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+            </div>
 
-        <div class="examples">
-            <h3>💡 Supported URL formats:</h3>
-            <code>https://www.youtube.com/watch?v=VIDEO_ID</code>
-            <code>https://youtu.be/VIDEO_ID</code>
-            <code>https://youtube.com/watch?v=VIDEO_ID</code>
+            <button class="btn" onclick="getVideoInfo()">📄 Get Video Info</button>
+            <button class="btn" onclick="downloadSingle()">⬇️ Download MP3</button>
+            
+            <div id="videoInfo" class="video-info">
+                <h3>Video Information</h3>
+                <div id="videoDetails"></div>
+            </div>
         </div>
 
-        <div class="video-info" id="videoInfo">
-            <h3>📹 Video Information</h3>
-            <p><strong>Title:</strong> <span id="videoTitle"></span></p>
-            <p><strong>Duration:</strong> <span id="videoDuration"></span> seconds</p>
-            <p><strong>Uploader:</strong> <span id="videoUploader"></span></p>
+        <!-- Playlist Tab -->
+        <div id="playlist-tab" class="tab-content">
+            <div class="form-group">
+                <label for="playlistUrlInput">YouTube Playlist URL:</label>
+                <input type="url" id="playlistUrlInput" placeholder="https://www.youtube.com/playlist?list=..." />
+            </div>
+
+            <div class="form-group">
+                <label for="maxVideos">Max Videos to Download:</label>
+                <select id="maxVideos">
+                    <option value="10">10 videos</option>
+                    <option value="25" selected>25 videos</option>
+                    <option value="50">50 videos</option>
+                    <option value="100">100 videos</option>
+                </select>
+            </div>
+
+            <button class="btn" onclick="getPlaylistInfo()">📋 Get Playlist Info</button>
+            <button class="btn" onclick="downloadPlaylist()">⬇️ Download Playlist</button>
+
+            <div id="playlistInfo" class="playlist-info">
+                <h3>Playlist Information</h3>
+                <div id="playlistDetails"></div>
+            </div>
         </div>
 
-        <div class="status" id="status"></div>
+        <!-- Settings Tab -->
+        <div id="settings-tab" class="tab-content">
+            <div class="form-group">
+                <label for="audioQuality">Audio Quality:</label>
+                <select id="audioQuality">
+                    <option value="0">Best Quality</option>
+                    <option value="128">128 kbps</option>
+                    <option value="192">192 kbps</option>
+                    <option value="256">256 kbps</option>
+                    <option value="320">320 kbps</option>
+                </select>
+            </div>
 
+            <div class="form-group">
+                <label for="namingTemplate">File Naming Template:</label>
+                <select id="namingTemplate">
+                    <option value="DEFAULT">Title [ID] (Default)</option>
+                    <option value="ARTIST_TITLE">Artist - Title</option>
+                    <option value="DATE_TITLE">Date - Title</option>
+                    <option value="DURATION_TITLE">Title (Duration)</option>
+                    <option value="PLAYLIST_INDEX">01. Title (For playlists)</option>
+                </select>
+            </div>
+
+            <div class="form-group">
+                <label for="customTemplate">Custom Template:</label>
+                <input type="text" id="customTemplate" placeholder="{title} by {uploader}" />
+                <small>Available: {title}, {uploader}, {upload_date}, {duration}, {id}</small>
+            </div>
+        </div>
+
+        <!-- Progress Bar -->
+        <div id="progressContainer" class="progress-container">
+            <div class="progress-bar">
+                <div id="progressBarFill" class="progress-bar-fill"></div>
+            </div>
+            <div id="progressText" class="progress-text">Preparing download...</div>
+        </div>
+
+        <!-- Status Messages -->
+        <div id="status" class="status"></div>
+
+        <!-- Download History -->
+        <div id="downloadHistory" class="download-history" style="display: none;">
+            <h3>Download History</h3>
+            <div id="historyList"></div>
+        </div>
+
+        <!-- Legal Disclaimer -->
         <div class="disclaimer">
-            <h3>📋 Legal Disclaimer</h3>
-            <p>This tool is intended only for downloading content you own or have legal rights to use. Please respect copyright laws and YouTube's Terms of Service.</p>
+            <strong>⚠️ Legal Disclaimer:</strong> This tool is intended only for downloading content you own or have legal rights to use. Please respect copyright laws and YouTube's Terms of Service. Use responsibly.
         </div>
     </div>
 
     <script>
-        const form = document.getElementById('downloadForm');
-        const urlInput = document.getElementById('youtubeUrl');
-        const downloadBtn = document.getElementById('downloadBtn');
-        const status = document.getElementById('status');
-        const videoInfo = document.getElementById('videoInfo');
+        let currentDownloads = new Map();
+        let downloadHistory = JSON.parse(localStorage.getItem('downloadHistory')) || [];
+
+        // Tab Management
+        function showTab(tabName) {
+            // Hide all tab contents
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            
+            // Remove active class from all tabs
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            
+            // Show selected tab content
+            document.getElementById(tabName + '-tab').classList.add('active');
+            
+            // Add active class to selected tab
+            event.target.classList.add('active');
+        }
+
+        // Drag and Drop Functionality
+        const dragDropArea = document.getElementById('dragDropArea');
+        const urlInput = document.getElementById('urlInput');
+
+        dragDropArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            dragDropArea.classList.add('dragover');
+        });
+
+        dragDropArea.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            dragDropArea.classList.remove('dragover');
+        });
+
+        dragDropArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            dragDropArea.classList.remove('dragover');
+            
+            const text = e.dataTransfer.getData('text');
+            if (text && (text.includes('youtube.com') || text.includes('youtu.be'))) {
+                urlInput.value = text;
+                getVideoInfo();
+            }
+        });
+
+        // URL Input Paste Detection
+        urlInput.addEventListener('paste', (e) => {
+            setTimeout(() => {
+                const url = urlInput.value.trim();
+                if (url && (url.includes('youtube.com') || url.includes('youtu.be'))) {
+                    getVideoInfo();
+                }
+            }, 100);
+        });
+
+        // Progress Management
+        function showProgress(show = true) {
+            const container = document.getElementById('progressContainer');
+            container.style.display = show ? 'block' : 'none';
+            if (!show) {
+                updateProgress(0, '');
+            }
+        }
+
+        function updateProgress(percentage, text) {
+            document.getElementById('progressBarFill').style.width = percentage + '%';
+            document.getElementById('progressText').textContent = text;
+        }
 
         function showStatus(message, type = 'info') {
-            status.className = \`status \${type}\`;
-            status.innerHTML = message;
+            const status = document.getElementById('status');
+            status.textContent = message;
+            status.className = 'status ' + type;
             status.style.display = 'block';
         }
 
         function hideStatus() {
-            status.style.display = 'none';
+            document.getElementById('status').style.display = 'none';
         }
 
-        function showVideoInfo(info) {
-            document.getElementById('videoTitle').textContent = info.title;
-            document.getElementById('videoDuration').textContent = info.duration;
-            document.getElementById('videoUploader').textContent = info.uploader;
-            videoInfo.style.display = 'block';
-        }
-
-        function hideVideoInfo() {
-            videoInfo.style.display = 'none';
-        }
-
-        function setLoading(loading) {
-            downloadBtn.disabled = loading;
-            if (loading) {
-                downloadBtn.innerHTML = '<span class="loading"></span>Processing...';
-            } else {
-                downloadBtn.innerHTML = 'Download MP3';
-            }
-        }
-
-        // Get video info when URL is entered
-        urlInput.addEventListener('blur', async function() {
-            const url = this.value.trim();
+        // Video Info Functions
+        async function getVideoInfo() {
+            const url = document.getElementById('urlInput').value.trim();
             if (!url) return;
 
             try {
-                showStatus('<span class="loading"></span>Getting video information...', 'info');
+                showStatus('Getting video information...', 'info');
                 
-                const response = await fetch('/video-info', {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ url: url })
-                });
+                const response = await fetch('/api/video-info?url=' + encodeURIComponent(url));
+                const data = await response.json();
 
-                const result = await response.json();
-
-                if (result.success) {
-                    showVideoInfo(result.data);
-                    hideStatus();
+                if (data.success) {
+                    displayVideoInfo(data.info);
+                    showStatus('Video information loaded successfully!', 'success');
                 } else {
-                    hideVideoInfo();
-                    showStatus(\`❌ \${result.message}\`, 'error');
+                    showStatus('Error: ' + data.message, 'error');
                 }
             } catch (error) {
-                hideVideoInfo();
-                showStatus('❌ Could not get video information', 'error');
+                showStatus('Error getting video info: ' + error.message, 'error');
             }
-        });
+        }
 
-        form.addEventListener('submit', async function(e) {
-            e.preventDefault();
+        function displayVideoInfo(info) {
+            const videoInfo = document.getElementById('videoInfo');
+            const details = document.getElementById('videoDetails');
             
-            const url = urlInput.value.trim();
+            const duration = Math.floor(info.duration / 60) + ':' + String(info.duration % 60).padStart(2, '0');
+            
+            details.innerHTML = \`
+                <p><strong>Title:</strong> \${info.title}</p>
+                <p><strong>Uploader:</strong> \${info.uploader}</p>
+                <p><strong>Duration:</strong> \${duration}</p>
+                <p><strong>Upload Date:</strong> \${info.upload_date}</p>
+                \${info.description ? '<p><strong>Description:</strong> ' + info.description.substring(0, 200) + '...</p>' : ''}
+            \`;
+            
+            videoInfo.style.display = 'block';
+        }
+
+        // Playlist Functions
+        async function getPlaylistInfo() {
+            const url = document.getElementById('playlistUrlInput').value.trim();
+            if (!url) return;
+
+            try {
+                showStatus('Getting playlist information...', 'info');
+                
+                const response = await fetch('/api/playlist-info?url=' + encodeURIComponent(url));
+                const data = await response.json();
+
+                if (data.success) {
+                    displayPlaylistInfo(data);
+                    showStatus('Playlist information loaded successfully!', 'success');
+                } else {
+                    showStatus('Error: ' + data.message, 'error');
+                }
+            } catch (error) {
+                showStatus('Error getting playlist info: ' + error.message, 'error');
+            }
+        }
+
+        function displayPlaylistInfo(data) {
+            const playlistInfo = document.getElementById('playlistInfo');
+            const details = document.getElementById('playlistDetails');
+            
+            let videosHtml = '';
+            data.info.entries.slice(0, 10).forEach((video, index) => {
+                videosHtml += \`
+                    <div class="playlist-item">
+                        <strong>\${index + 1}. \${video.title}</strong><br>
+                        <small>by \${video.uploader || 'Unknown'}</small>
+                    </div>
+                \`;
+            });
+            
+            if (data.info.entries.length > 10) {
+                videosHtml += \`<p><em>... and \${data.info.entries.length - 10} more videos</em></p>\`;
+            }
+            
+            details.innerHTML = \`
+                <p><strong>Playlist:</strong> \${data.info.title}</p>
+                <p><strong>Total Videos:</strong> \${data.info.entries.length}</p>
+                <div style="max-height: 200px; overflow-y: auto;">
+                    \${videosHtml}
+                </div>
+            \`;
+            
+            playlistInfo.style.display = 'block';
+        }
+
+        // Download Functions
+        async function downloadSingle() {
+            const url = document.getElementById('urlInput').value.trim();
             if (!url) {
-                showStatus('❌ Please enter a YouTube URL', 'error');
+                showStatus('Please enter a YouTube URL', 'error');
                 return;
             }
 
-            setLoading(true);
-            hideVideoInfo();
-            showStatus('<span class="loading"></span>Downloading and extracting audio... This may take a few minutes.', 'info');
+            const downloadId = Date.now().toString();
+            currentDownloads.set(downloadId, { url, type: 'single' });
 
             try {
-                const response = await fetch('/download', {
+                showProgress(true);
+                updateProgress(0, 'Starting download...');
+                showStatus('Starting download...', 'info');
+
+                const response = await fetch('/api/download', {
                     method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json',
-                    },
-                    body: JSON.stringify({ url: url })
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        url: url,
+                        audioQuality: document.getElementById('audioQuality').value,
+                        namingTemplate: document.getElementById('namingTemplate').value,
+                        customTemplate: document.getElementById('customTemplate').value
+                    })
                 });
 
-                const result = await response.json();
+                const data = await response.json();
 
-                if (result.success) {
-                    showStatus(\`🎉 Success! Audio extracted: <strong>\${result.filename}</strong><br>📁 Saved to: \${result.outputPath}\`, 'success');
+                if (data.success) {
+                    updateProgress(100, 'Download completed!');
+                    showStatus('Download completed successfully!', 'success');
+                    addToHistory(url, data.filename, 'completed');
                 } else {
-                    showStatus(\`❌ Download failed: \${result.message}\`, 'error');
+                    showStatus('Download failed: ' + data.message, 'error');
+                    addToHistory(url, null, 'failed');
                 }
             } catch (error) {
-                showStatus('❌ Network error. Please check your connection and try again.', 'error');
+                showStatus('Error: ' + error.message, 'error');
+                addToHistory(url, null, 'failed');
             } finally {
-                setLoading(false);
+                currentDownloads.delete(downloadId);
+                setTimeout(() => showProgress(false), 2000);
             }
-        });
+        }
 
-        // Check dependencies on page load
-        window.addEventListener('load', async function() {
+        async function downloadPlaylist() {
+            const url = document.getElementById('playlistUrlInput').value.trim();
+            if (!url) {
+                showStatus('Please enter a YouTube playlist URL', 'error');
+                return;
+            }
+
+            const downloadId = Date.now().toString();
+            const maxVideos = document.getElementById('maxVideos').value;
+            currentDownloads.set(downloadId, { url, type: 'playlist' });
+
             try {
-                const response = await fetch('/check-dependencies');
-                const result = await response.json();
+                showProgress(true);
+                updateProgress(0, 'Starting playlist download...');
+                showStatus('Starting playlist download...', 'info');
 
-                if (!result.allAvailable) {
-                    showStatus(\`❌ Missing dependencies: \${result.errors.join(', ')}\`, 'error');
-                }
+                // Use EventSource for proper Server-Sent Events
+                const eventSource = new EventSource('/api/download-playlist?' + new URLSearchParams({
+                    url: url,
+                    maxVideos: maxVideos,
+                    audioQuality: document.getElementById('audioQuality').value,
+                    namingTemplate: document.getElementById('namingTemplate').value,
+                    customTemplate: document.getElementById('customTemplate').value
+                }));
+
+                let completedVideos = 0;
+                let totalVideos = 1;
+
+                eventSource.onmessage = function(event) {
+                    try {
+                        const data = JSON.parse(event.data);
+                        
+                        switch(data.type) {
+                            case 'start':
+                                showStatus('Playlist download started...', 'info');
+                                break;
+                                
+                            case 'progress':
+                                if (data.data.current && data.data.total) {
+                                    totalVideos = data.data.total;
+                                    const percentage = Math.round((data.data.current / data.data.total) * 100);
+                                    updateProgress(percentage, \`\${data.data.current}/\${data.data.total}: \${data.data.videoTitle || 'Processing...'}\`);
+                                }
+                                break;
+                                
+                            case 'video_complete':
+                                completedVideos++;
+                                const videoTitle = data.data.title || 'Unknown';
+                                showStatus(\`Completed \${completedVideos}/\${totalVideos}: \${videoTitle}\`, 'info');
+                                addToHistory(data.data.url || url, data.data.filename, 'completed');
+                                break;
+                                
+                            case 'complete':
+                                updateProgress(100, 'Playlist download completed!');
+                                showStatus(\`Playlist completed! \${data.data.completedVideos}/\${data.data.totalVideos} videos downloaded successfully.\`, 'success');
+                                eventSource.close();
+                                setTimeout(() => showProgress(false), 2000);
+                                break;
+                                
+                            case 'error':
+                                showStatus('Error: ' + data.data.message, 'error');
+                                eventSource.close();
+                                setTimeout(() => showProgress(false), 2000);
+                                break;
+                                
+                            case 'end':
+                                eventSource.close();
+                                break;
+                        }
+                    } catch (e) {
+                        console.error('Error parsing SSE data:', e);
+                    }
+                };
+
+                eventSource.onerror = function(event) {
+                    console.error('SSE Error:', event);
+                    showStatus('Connection error during playlist download', 'error');
+                    eventSource.close();
+                    setTimeout(() => showProgress(false), 2000);
+                };
+
+                // Cleanup on page unload
+                window.addEventListener('beforeunload', () => {
+                    eventSource.close();
+                });
+
             } catch (error) {
-                showStatus('❌ Could not check dependencies', 'error');
+                showStatus('Error: ' + error.message, 'error');
+                setTimeout(() => showProgress(false), 2000);
+            } finally {
+                currentDownloads.delete(downloadId);
             }
-        });
+        }
+
+        // History Management
+        function addToHistory(url, filename, status) {
+            const historyItem = {
+                url,
+                filename,
+                status,
+                timestamp: new Date().toISOString(),
+                title: document.querySelector('#videoInfo h3')?.nextElementSibling?.querySelector('p')?.textContent?.replace('Title: ', '') || 'Unknown'
+            };
+            
+            downloadHistory.unshift(historyItem);
+            downloadHistory = downloadHistory.slice(0, 50); // Keep only last 50
+            
+            localStorage.setItem('downloadHistory', JSON.stringify(downloadHistory));
+            updateHistoryDisplay();
+        }
+
+        function updateHistoryDisplay() {
+            if (downloadHistory.length === 0) return;
+            
+            const historyContainer = document.getElementById('downloadHistory');
+            const historyList = document.getElementById('historyList');
+            
+            historyList.innerHTML = downloadHistory.slice(0, 10).map(item => \`
+                <div class="history-item">
+                    <div class="title">\${item.title}</div>
+                    <div class="status \${item.status}">\${item.status}</div>
+                </div>
+            \`).join('');
+            
+            historyContainer.style.display = 'block';
+        }
     </script>
 </body>
 </html>
-  `;
-  
+    `;
+    
   res.send(html);
-});
-
-/**
- * API endpoint to check dependencies
- */
-app.get('/check-dependencies', rateLimitMiddleware(apiRateLimiter), async (req, res) => {
-  try {
-    const result = await checkDependencies();
-    res.json(result);
-  } catch (error) {
-    logError(error, 'dependency-check-api');
-    const errorResponse = handleError(error, 'dependency-check');
-    res.status(500).json(errorResponse);
-  }
 });
 
 /**
  * API endpoint to get video information
  */
-app.post('/video-info', rateLimitMiddleware(apiRateLimiter), async (req, res) => {
+app.get('/api/video-info', rateLimitMiddleware(apiRateLimiter), async (req, res) => {
   try {
-    // Validate input
-    const validation = validateApiInput(req.body, {
-      url: {
-        required: true,
-        type: 'string',
-        maxLength: 2000,
-        validate: (url) => url.trim().length > 0,
-        validateMessage: 'must not be empty'
-      }
-    });
-
-    if (!validation.isValid) {
+    const { url } = req.query;
+    
+    if (!url) {
       return res.status(400).json({
         success: false,
-        message: 'Invalid input',
-        errors: validation.errors,
-        code: 'VALIDATION_ERROR'
+        message: 'URL parameter is required',
+        code: 'MISSING_URL'
       });
     }
 
-    const { url } = req.body;
     console.log(`📹 Getting video info for: ${url}`);
     
     const videoInfo = await getVideoInfo(url);
@@ -483,7 +835,7 @@ app.post('/video-info', rateLimitMiddleware(apiRateLimiter), async (req, res) =>
     if (videoInfo.success) {
       res.json({
         success: true,
-        data: videoInfo
+        info: videoInfo
       });
     } else {
       res.status(400).json({
@@ -493,16 +845,47 @@ app.post('/video-info', rateLimitMiddleware(apiRateLimiter), async (req, res) =>
       });
     }
   } catch (error) {
-    logError(error, 'video-info-api');
+    logError(error, 'api-video-info');
     const errorResponse = handleError(error, 'video-info');
     res.status(500).json(errorResponse);
   }
 });
 
 /**
- * API endpoint to download and extract audio
+ * API endpoint to get playlist information
  */
-app.post('/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit exceeded. Please wait before trying again.'), async (req, res) => {
+app.get('/api/playlist-info', rateLimitMiddleware(apiRateLimiter), async (req, res) => {
+  try {
+    const { url } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        message: 'URL parameter is required',
+        code: 'MISSING_URL'
+      });
+    }
+
+    console.log(`📋 Getting playlist info for: ${url}`);
+    
+    const playlistInfo = await getPlaylistInfo(url);
+    
+    res.json({
+      success: true,
+      info: playlistInfo
+    });
+    
+  } catch (error) {
+    logError(error, 'api-playlist-info');
+    const errorResponse = handleError(error, 'playlist-info');
+    res.status(500).json(errorResponse);
+  }
+});
+
+/**
+ * API endpoint to download and extract audio from single video
+ */
+app.post('/api/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit exceeded. Please wait before trying again.'), async (req, res) => {
   try {
     // Validate input
     const validation = validateApiInput(req.body, {
@@ -524,36 +907,32 @@ app.post('/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit e
       });
     }
 
-    const { url } = req.body;
+    const { url, audioQuality = '0', namingTemplate = 'DEFAULT', customTemplate = '' } = req.body;
 
     // Generate a unique ID for this download
     const downloadId = Date.now().toString();
     console.log(`🎵 Starting download ${downloadId} for: ${url}`);
 
-    // Store download in active downloads
-    activeDownloads.set(downloadId, {
+    // Store download in progress tracker
+    progressTracker.startDownload(downloadId, {
       url,
-      status: 'processing',
-      startTime: new Date()
+      type: 'single',
+      status: 'starting'
     });
 
-    // Perform the download with enhanced error handling
+    // Perform the download
     const result = await extractAudio(url, {
       outputPath: process.cwd(),
       audioFormat: 'mp3',
-      audioQuality: '0',
-      maxRetries: 2 // Reduced retries for web interface
-    });
-
-    // Update download status
-    activeDownloads.set(downloadId, {
-      ...activeDownloads.get(downloadId),
-      status: result.success ? 'completed' : 'failed',
-      endTime: new Date(),
-      result
+      audioQuality: audioQuality,
+      maxRetries: 2,
+      onProgress: (progress) => {
+        progressTracker.updateProgress(downloadId, progress);
+      }
     });
 
     if (result.success) {
+      progressTracker.completeDownload(downloadId, result);
       console.log(`✅ Download ${downloadId} completed: ${result.filename}`);
       res.json({
         success: true,
@@ -563,6 +942,7 @@ app.post('/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit e
         downloadId
       });
     } else {
+      progressTracker.failDownload(downloadId, result.message);
       console.log(`❌ Download ${downloadId} failed: ${result.message}`);
       const statusCode = result.code === 'VALIDATION_ERROR' ? 400 : 422;
       res.status(statusCode).json({
@@ -575,16 +955,8 @@ app.post('/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit e
       });
     }
 
-    // Clean up old downloads (keep only last 20)
-    if (activeDownloads.size > 20) {
-      const entries = Array.from(activeDownloads.entries());
-      entries.slice(0, entries.length - 20).forEach(([id]) => {
-        activeDownloads.delete(id);
-      });
-    }
-
   } catch (error) {
-    logError(error, 'download-api');
+    logError(error, 'api-download');
     const errorResponse = handleError(error, 'download');
     const statusCode = error.name === 'ValidationError' ? 400 : 500;
     res.status(statusCode).json(errorResponse);
@@ -592,25 +964,184 @@ app.post('/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit e
 });
 
 /**
- * API endpoint to check download status
+ * API endpoint to download playlist
  */
-app.get('/download-status/:id', (req, res) => {
-  const { id } = req.params;
-  const download = activeDownloads.get(id);
-  
-  if (!download) {
-    return res.status(404).json({
-      success: false,
-      message: 'Download not found'
+app.post('/api/download-playlist', rateLimitMiddleware(downloadRateLimiter, 'Download limit exceeded. Please wait before trying again.'), async (req, res) => {
+  try {
+    const { url, maxVideos = 10, audioQuality = '0', namingTemplate = 'PLAYLIST_INDEX' } = req.body;
+    
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        message: 'URL is required',
+        code: 'MISSING_URL'
+      });
+    }
+
+    const downloadId = Date.now().toString();
+    console.log(`🎵 Starting playlist download ${downloadId} for: ${url}`);
+
+    // Set headers for Server-Sent Events
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control'
     });
+
+    // Keep connection alive
+    const keepAlive = setInterval(() => {
+      res.write('data: {"type":"keepalive"}\n\n');
+    }, 15000);
+
+    // Send initial status
+    res.write(`data: {"type":"start","downloadId":"${downloadId}","status":"starting"}\n\n`);
+
+    progressTracker.startDownload(downloadId, {
+      url,
+      type: 'playlist',
+      maxVideos,
+      status: 'starting'
+    });
+
+    // Start playlist download with progress callbacks
+    const result = await extractPlaylistAudio(url, {
+      outputPath: process.cwd(),
+      audioFormat: 'mp3',
+      audioQuality: audioQuality,
+      maxVideos: parseInt(maxVideos),
+      onProgress: (progress) => {
+        progressTracker.updateProgress(downloadId, progress);
+        // Send progress update to client
+        res.write(`data: {"type":"progress","data":${JSON.stringify(progress)}}\n\n`);
+      },
+      onVideoComplete: (completion) => {
+        // Send completion update to client
+        res.write(`data: {"type":"video_complete","data":${JSON.stringify(completion)}}\n\n`);
+      }
+    });
+
+    if (result.success) {
+      progressTracker.completeDownload(downloadId, result);
+      res.write(`data: {"type":"complete","data":${JSON.stringify(result)}}\n\n`);
+    } else {
+      progressTracker.failDownload(downloadId, result.message);
+      res.write(`data: {"type":"error","data":{"message":"${result.message}"}}\n\n`);
+    }
+
+    clearInterval(keepAlive);
+    res.write('data: {"type":"end"}\n\n');
+    res.end();
+
+  } catch (error) {
+    logError(error, 'api-download-playlist');
+    if (!res.headersSent) {
+      const errorResponse = handleError(error, 'playlist-download');
+      res.status(500).json(errorResponse);
+    } else {
+      res.write(`data: {"type":"error","data":{"message":"${error.message}"}}\n\n`);
+      res.end();
+    }
   }
-  
-  res.json({
-    success: true,
-    data: download
-  });
 });
 
+/**
+ * API endpoint to download playlist via Server-Sent Events
+ */
+app.get('/api/download-playlist', rateLimitMiddleware(downloadRateLimiter, 'Download limit exceeded. Please wait before trying again.'), async (req, res) => {
+  try {
+    const { url, maxVideos = 10, audioQuality = '0', namingTemplate = 'PLAYLIST_INDEX' } = req.query;
+    
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        message: 'URL is required',
+        code: 'MISSING_URL'
+      });
+    }
+
+    const downloadId = Date.now().toString();
+    console.log(`🎵 Starting playlist download ${downloadId} for: ${url}`);
+
+    // Set headers for Server-Sent Events
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Headers': 'Cache-Control'
+    });
+
+    // Keep connection alive
+    const keepAlive = setInterval(() => {
+      res.write('data: {"type":"keepalive"}\n\n');
+    }, 15000);
+
+    // Send initial status
+    res.write(`data: {"type":"start","downloadId":"${downloadId}","status":"starting"}\n\n`);
+
+    progressTracker.startDownload(downloadId, {
+      url,
+      type: 'playlist',
+      maxVideos,
+      status: 'starting'
+    });
+
+    // Start playlist download with progress callbacks
+    const result = await extractPlaylistAudio(url, {
+      outputPath: process.cwd(),
+      audioFormat: 'mp3',
+      audioQuality: audioQuality,
+      maxVideos: parseInt(maxVideos),
+      onProgress: (progress) => {
+        progressTracker.updateProgress(downloadId, progress);
+        // Send progress update to client
+        res.write(`data: {"type":"progress","data":${JSON.stringify(progress)}}\n\n`);
+      },
+      onVideoComplete: (completion) => {
+        // Send completion update to client
+        res.write(`data: {"type":"video_complete","data":${JSON.stringify(completion)}}\n\n`);
+      }
+    });
+
+    if (result.success) {
+      progressTracker.completeDownload(downloadId, result);
+      res.write(`data: {"type":"complete","data":${JSON.stringify(result)}}\n\n`);
+    } else {
+      progressTracker.failDownload(downloadId, result.message);
+      res.write(`data: {"type":"error","data":{"message":"${result.message}"}}\n\n`);
+    }
+
+    clearInterval(keepAlive);
+    res.write('data: {"type":"end"}\n\n');
+    res.end();
+
+  } catch (error) {
+    logError(error, 'api-download-playlist-sse');
+    if (!res.headersSent) {
+      const errorResponse = handleError(error, 'playlist-download');
+      res.status(500).json(errorResponse);
+    } else {
+      res.write(`data: {"type":"error","data":{"message":"${error.message}"}}\n\n`);
+      res.end();
+    }
+  }
+});
+
+/**
+ * API endpoint to check dependencies
+ */
+app.get('/api/check-dependencies', rateLimitMiddleware(apiRateLimiter), async (req, res) => {
+  try {
+    const result = await checkDependencies();
+    res.json(result);
+  } catch (error) {
+    logError(error, 'api-dependency-check');
+    const errorResponse = handleError(error, 'dependency-check');
+    res.status(500).json(errorResponse);
+  }
+});
 /**
  * Health check endpoint
  */

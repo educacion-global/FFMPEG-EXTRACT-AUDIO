@@ -92,6 +92,125 @@ export async function extractAudio(url, options = {}) {
 }
 
 /**
+ * Downloads and extracts audio from a YouTube playlist using yt-dlp
+ * @param {string} url - The YouTube playlist URL
+ * @param {object} options - Download options
+ * @returns {Promise<object>} - Result object with success status and playlist details
+ */
+export async function extractPlaylistAudio(url, options = {}) {
+  const {
+    outputPath = process.cwd(),
+    audioFormat = 'mp3',
+    audioQuality = '0',
+    onProgress = null,
+    onVideoComplete = null,
+    maxRetries = 3,
+    maxVideos = 50 // Safety limit
+  } = options;
+
+  console.log(`🎵 Starting playlist audio extraction for: ${url}`);
+  const retryManager = new RetryManager(maxRetries, 2000);
+
+  try {
+    // Validate URL (should be a playlist)
+    const cleanURL = validateAndSanitizeYouTubeURL(url);
+    if (!cleanURL.includes('playlist') && !cleanURL.includes('list=')) {
+      throw new YouTubeDownloadError('URL is not a valid YouTube playlist', 'INVALID_PLAYLIST_URL');
+    }
+
+    console.log(`✅ Playlist URL validated successfully`);
+
+    // Get playlist info first
+    const playlistInfo = await getPlaylistInfo(cleanURL);
+    console.log(`📋 Found ${playlistInfo.entries.length} videos in playlist: "${playlistInfo.title}"`);
+
+    // Limit videos for safety
+    const videosToProcess = playlistInfo.entries.slice(0, maxVideos);
+    if (playlistInfo.entries.length > maxVideos) {
+      console.log(`⚠️ Processing only first ${maxVideos} videos for safety`);
+    }
+
+    const results = {
+      success: true,
+      playlistTitle: playlistInfo.title,
+      totalVideos: videosToProcess.length,
+      completedVideos: 0,
+      failedVideos: 0,
+      downloads: [],
+      errors: []
+    };
+
+    // Process each video
+    for (let i = 0; i < videosToProcess.length; i++) {
+      const video = videosToProcess[i];
+      const videoUrl = `https://www.youtube.com/watch?v=${video.id}`;
+      
+      try {
+        if (onProgress) {
+          onProgress({
+            current: i + 1,
+            total: videosToProcess.length,
+            videoTitle: video.title,
+            status: 'downloading'
+          });
+        }
+
+        const downloadResult = await retryManager.executeWithRetry(async () => {
+          return await performDownload(videoUrl, {
+            outputPath,
+            audioFormat,
+            audioQuality,
+            baseFilename: generateSafeFilename(video.title, video.id)
+          });
+        });
+
+        results.downloads.push({
+          videoId: video.id,
+          title: video.title,
+          filename: downloadResult.filename,
+          success: true
+        });
+
+        results.completedVideos++;
+        
+        if (onVideoComplete) {
+          onVideoComplete({
+            videoId: video.id,
+            title: video.title,
+            filename: downloadResult.filename,
+            current: i + 1,
+            total: videosToProcess.length
+          });
+        }
+
+        console.log(`✅ [${i + 1}/${videosToProcess.length}] Downloaded: ${video.title}`);
+
+      } catch (error) {
+        console.error(`❌ [${i + 1}/${videosToProcess.length}] Failed: ${video.title}`, error.message);
+        
+        results.failedVideos++;
+        results.errors.push({
+          videoId: video.id,
+          title: video.title,
+          error: error.message
+        });
+
+        // Continue with next video
+        continue;
+      }
+    }
+
+    console.log(`🎉 Playlist download completed! ${results.completedVideos}/${results.totalVideos} videos successful`);
+    return results;
+
+  } catch (error) {
+    console.error('❌ Playlist extraction failed:', error.message);
+    logError(error, { url, options });
+    throw handleError(error, 'playlist extraction');
+  }
+}
+
+/**
  * Performs the actual download operation
  */
 async function performDownload(url, options) {
@@ -303,5 +422,56 @@ export async function getVideoInfo(url) {
       error: classifiedError.message,
       code: classifiedError.code
     };
+  }
+}
+
+/**
+ * Gets information about a YouTube playlist
+ * @param {string} url - The YouTube playlist URL
+ * @returns {Promise<object>} - Playlist information
+ */
+export async function getPlaylistInfo(url) {
+  try {
+    const command = `yt-dlp --flat-playlist --dump-json "${url}"`;
+    const { stdout, stderr } = await execAsync(command, { 
+      timeout: 30000,
+      maxBuffer: 1024 * 1024 * 10 // 10MB buffer
+    });
+
+    if (stderr && !stdout) {
+      throw new YouTubeDownloadError(`Failed to get playlist info: ${stderr}`, 'PLAYLIST_INFO_ERROR');
+    }
+
+    // Parse JSON lines
+    const lines = stdout.trim().split('\n').filter(line => line.trim());
+    const entries = lines.map(line => {
+      try {
+        return JSON.parse(line);
+      } catch (e) {
+        return null;
+      }
+    }).filter(Boolean);
+
+    if (entries.length === 0) {
+      throw new YouTubeDownloadError('No videos found in playlist', 'EMPTY_PLAYLIST');
+    }
+
+    // Get playlist title from first entry or generate one
+    const playlistTitle = entries[0].playlist_title || 
+                         entries[0].uploader || 
+                         `Playlist_${new Date().toISOString().split('T')[0]}`;
+
+    return {
+      title: playlistTitle,
+      entries: entries.map(entry => ({
+        id: entry.id,
+        title: entry.title || `Video ${entry.id}`,
+        duration: entry.duration,
+        uploader: entry.uploader
+      }))
+    };
+
+  } catch (error) {
+    throw classifyYouTubeError(error);
   }
 }

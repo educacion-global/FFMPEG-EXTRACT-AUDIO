@@ -10,7 +10,11 @@ A local YouTube to MP3 downloader for macOS that runs entirely on your machine. 
 
 - 🎵 **High-quality MP3 extraction** using yt-dlp and ffmpeg
 - 💻 **CLI interface** for command-line users
-- 🌐 **Web interface** for browser-based usage  
+- 🌐 **Web interface** with modern, responsive design  
+- 📋 **Playlist downloads** - Download entire YouTube playlists
+- 📊 **Real-time progress bars** - Track download progress with detailed status
+- 🎯 **Drag & drop interface** - Simply drag YouTube URLs onto the web interface
+- 🏷️ **Smart filename templates** - Multiple naming options for organized files
 - 🔒 **100% local** - no data sent to external servers
 - 🛡️ **Secure** - input validation and rate limiting
 - ⚡ **Fast** - direct system tool integration
@@ -62,25 +66,37 @@ npm run cli -- --check-deps
 
 ### CLI Mode
 
-Download a single video directly from the command line:
+Download videos or entire playlists directly from the command line:
 
 ```bash
-# Basic usage
+# Single video download
 npm run cli -- "https://www.youtube.com/watch?v=VIDEO_ID"
-
-# Or use node directly
 node download.js "https://www.youtube.com/watch?v=VIDEO_ID"
+
+# Playlist download (default: 25 videos)
+npm run playlist -- "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+node download.js --playlist "https://www.youtube.com/playlist?list=PLAYLIST_ID"
+
+# Playlist download (limited number)
+npm run playlist -- "https://www.youtube.com/playlist?list=PLAYLIST_ID" 10
+node download.js --playlist "https://www.youtube.com/playlist?list=PLAYLIST_ID" 10
 
 # Show help
 npm run cli -- --help
+node download.js --help
 
 # Check dependencies
-npm run cli -- --check-deps
+npm run deps
+node download.js --check-deps
 ```
 
 **Example:**
 ```bash
+# Download single video
 npm run cli -- "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+
+# Download first 5 videos from a playlist
+npm run playlist -- "https://www.youtube.com/playlist?list=PLrAXtmRdnEQy6nuLMfJJuaP73-5MzX9tb" 5
 ```
 
 ### Web Interface
@@ -97,10 +113,13 @@ node server.js
 Then open your browser to: **http://localhost:3000**
 
 The web interface provides:
-- YouTube URL input field
+- YouTube URL input field with drag & drop support
 - Video info preview (title, duration, etc.)
-- One-click download with real-time status
-- Download history and progress tracking
+- Playlist support with progress tracking
+- Multiple filename template options
+- One-click download with real-time progress bars
+- Download history and status tracking
+- Responsive design for mobile and desktop
 
 ## API Endpoints
 
@@ -115,13 +134,32 @@ Verify yt-dlp and ffmpeg are installed.
 ### GET `/api/video-info?url=<youtube_url>`
 Get video information without downloading.
 
+### GET `/api/playlist-info?url=<playlist_url>`
+Get playlist information without downloading.
+
 ### POST `/api/download`
 Download and convert video to MP3.
 
 **Request body:**
 ```json
 {
-  "url": "https://www.youtube.com/watch?v=VIDEO_ID"
+  "url": "https://www.youtube.com/watch?v=VIDEO_ID",
+  "audioQuality": "0",
+  "namingTemplate": "DEFAULT",
+  "customTemplate": ""
+}
+```
+
+### POST `/api/download-playlist`
+Download and convert playlist to MP3 files.
+
+**Request body:**
+```json
+{
+  "url": "https://www.youtube.com/playlist?list=PLAYLIST_ID",
+  "maxVideos": 25,
+  "audioQuality": "0",
+  "namingTemplate": "PLAYLIST_INDEX"
 }
 ```
 
@@ -140,13 +178,34 @@ FFMPEG-EXTRACT-AUDIO/
 
 ## Output Files
 
-Downloaded MP3 files are saved in the project directory with sanitized filenames:
+Downloaded MP3 files are saved in the project directory with various naming options:
 
+### Naming Templates
+
+- **DEFAULT**: `[Video Title] [Video ID].mp3`
+- **ARTIST_TITLE**: `[Uploader] - [Video Title].mp3`
+- **DATE_TITLE**: `[Upload Date] - [Video Title].mp3`
+- **DURATION_TITLE**: `[Video Title] ([Duration]s).mp3`
+- **PLAYLIST_INDEX**: `01. [Video Title].mp3` (for playlists)
+- **CUSTOM**: User-defined template with variables
+
+### Examples
 ```
-[Video Title] [Video ID].mp3
+Rick Astley - Never Gonna Give You Up [dQw4w9WgXcQ].mp3
+Rick Astley - Never Gonna Give You Up.mp3
+2009-10-25 - Never Gonna Give You Up.mp3
+Never Gonna Give You Up (212s).mp3
+01. Never Gonna Give You Up.mp3
 ```
 
-Example: `Rick Astley - Never Gonna Give You Up [dQw4w9WgXcQ].mp3`
+### Template Variables
+Available in custom templates:
+- `{title}` - Video title
+- `{uploader}` - Channel name
+- `{upload_date}` - Upload date
+- `{duration}` - Video duration in seconds
+- `{id}` - Video ID
+- `{playlist_index:02d}` - Playlist position (padded)
 
 ## Security Features
 
