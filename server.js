@@ -1,7 +1,9 @@
 import express from 'express';
 import { extractAudio, checkDependencies, getVideoInfo, extractPlaylistAudio, getPlaylistInfo } from './audioExtractor.js';
-import { validateAndSanitizeYouTubeURL, RateLimiter, validateApiInput, NAMING_TEMPLATES, generateFilenameFromTemplate, ProgressTracker } from './utils.js';
+import { validateAndSanitizeYouTubeURL, validateAndSanitizeSpotifyURL, detectURLType, RateLimiter, validateApiInput, NAMING_TEMPLATES, generateFilenameFromTemplate, ProgressTracker } from './utils.js';
 import { handleError, logError } from './errorHandler.js';
+import { SpotifyHandler } from './spotifyHandler.js';
+import { findBestYouTubeMatch } from './youtubeSearch.js';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
@@ -64,7 +66,7 @@ app.get('/', (req, res) => {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>FFMPEG-EXTRACT-AUDIO - YouTube to MP3 Converter</title>
+    <title>FFMPEG-EXTRACT-AUDIO - YouTube & Spotify to MP3 Converter</title>
     <style>
         * {
             margin: 0;
@@ -350,32 +352,32 @@ app.get('/', (req, res) => {
     <div class="container">
         <div class="logo">🎵</div>
         <h1>FFMPEG-EXTRACT-AUDIO</h1>
-        <p class="subtitle">Convert YouTube videos and playlists to high-quality MP3 files</p>
+        <p class="subtitle">Convert YouTube videos and Spotify tracks to high-quality MP3 files</p>
         
         <div class="tabs">
-            <button class="tab active" onclick="showTab('single')">Single Video</button>
+            <button class="tab active" onclick="showTab('single')">Single Track</button>
             <button class="tab" onclick="showTab('playlist')">Playlist</button>
             <button class="tab" onclick="showTab('settings')">Settings</button>
         </div>
 
-        <!-- Single Video Tab -->
+        <!-- Single Track Tab -->
         <div id="single-tab" class="tab-content active">
             <div class="drag-drop-area" id="dragDropArea" onclick="document.getElementById('urlInput').focus()">
                 <div>📎</div>
-                <p><strong>Drag & Drop a YouTube URL here</strong></p>
+                <p><strong>Drag & Drop a YouTube or Spotify URL here</strong></p>
                 <p>or paste it in the input below</p>
             </div>
             
             <div class="form-group">
-                <label for="urlInput">YouTube Video URL:</label>
-                <input type="url" id="urlInput" placeholder="https://www.youtube.com/watch?v=..." />
+                <label for="urlInput">YouTube or Spotify URL:</label>
+                <input type="url" id="urlInput" placeholder="YouTube: https://www.youtube.com/watch?v=... or Spotify: https://open.spotify.com/track/..." />
             </div>
 
-            <button class="btn" onclick="getVideoInfo()">📄 Get Video Info</button>
+            <button class="btn" onclick="getVideoInfo()">📄 Get Track Info</button>
             <button class="btn" onclick="downloadSingle()">⬇️ Download MP3</button>
             
             <div id="videoInfo" class="video-info">
-                <h3>Video Information</h3>
+                <h3>Track Information</h3>
                 <div id="videoDetails"></div>
             </div>
         </div>
@@ -383,17 +385,17 @@ app.get('/', (req, res) => {
         <!-- Playlist Tab -->
         <div id="playlist-tab" class="tab-content">
             <div class="form-group">
-                <label for="playlistUrlInput">YouTube Playlist URL:</label>
-                <input type="url" id="playlistUrlInput" placeholder="https://www.youtube.com/playlist?list=..." />
+                <label for="playlistUrlInput">YouTube or Spotify Playlist URL:</label>
+                <input type="url" id="playlistUrlInput" placeholder="YouTube: https://www.youtube.com/playlist?list=... or Spotify: https://open.spotify.com/playlist/..." />
             </div>
 
             <div class="form-group">
-                <label for="maxVideos">Max Videos to Download:</label>
+                <label for="maxVideos">Max Tracks to Download:</label>
                 <select id="maxVideos">
-                    <option value="10">10 videos</option>
-                    <option value="25" selected>25 videos</option>
-                    <option value="50">50 videos</option>
-                    <option value="100">100 videos</option>
+                    <option value="10">10 tracks</option>
+                    <option value="25" selected>25 tracks</option>
+                    <option value="50">50 tracks</option>
+                    <option value="100">100 tracks</option>
                 </select>
             </div>
 
@@ -422,11 +424,13 @@ app.get('/', (req, res) => {
             <div class="form-group">
                 <label for="namingTemplate">File Naming Template:</label>
                 <select id="namingTemplate">
-                    <option value="DEFAULT">Title [ID] (Default)</option>
-                    <option value="ARTIST_TITLE">Artist - Title</option>
-                    <option value="DATE_TITLE">Date - Title</option>
-                    <option value="DURATION_TITLE">Title (Duration)</option>
+                    <option value="DEFAULT">Title (Default)</option>
+                    <option value="TITLE_ARTIST">Title - Artist</option>
+                    <option value="TITLE_ID">Title [ID]</option>
+                    <option value="TITLE_DATE">Title (Date)</option>
+                    <option value="TITLE_DURATION">Title (Duration)</option>
                     <option value="PLAYLIST_INDEX">01. Title (For playlists)</option>
+                    <option value="ARTIST_TITLE">Artist - Title (Classic)</option>
                 </select>
             </div>
 
@@ -814,7 +818,7 @@ app.get('/', (req, res) => {
 });
 
 /**
- * API endpoint to get video information
+ * API endpoint to get video or track information
  */
 app.get('/api/video-info', rateLimitMiddleware(apiRateLimiter), async (req, res) => {
   try {
@@ -828,20 +832,68 @@ app.get('/api/video-info', rateLimitMiddleware(apiRateLimiter), async (req, res)
       });
     }
 
-    console.log(`📹 Getting video info for: ${url}`);
+    console.log(`📹 Getting track info for: ${url}`);
     
-    const videoInfo = await getVideoInfo(url);
+    const urlType = detectURLType(url);
     
-    if (videoInfo.success) {
-      res.json({
-        success: true,
-        info: videoInfo
-      });
+    if (urlType === 'youtube') {
+      const cleanURL = validateAndSanitizeYouTubeURL(url);
+      const videoInfo = await getVideoInfo(cleanURL);
+      
+      if (videoInfo.success) {
+        res.json({
+          success: true,
+          info: videoInfo,
+          urlType: 'youtube'
+        });
+      } else {
+        res.status(400).json({
+          success: false,
+          message: videoInfo.error || 'Could not get video information',
+          code: videoInfo.code || 'VIDEO_INFO_ERROR'
+        });
+      }
+    } else if (urlType === 'spotify') {
+      const cleanURL = validateAndSanitizeSpotifyURL(url);
+      const spotifyHandler = new SpotifyHandler();
+      
+      try {
+        const trackInfo = await spotifyHandler.extractTrackInfo(cleanURL);
+        
+        if (trackInfo.tracks && trackInfo.tracks.length > 0) {
+          const track = trackInfo.tracks[0];
+          res.json({
+            success: true,
+            info: {
+              title: track.title,
+              artist: track.artist,
+              album: track.album,
+              duration: track.duration,
+              year: track.year,
+              spotify_id: track.spotify_id,
+              uploader: track.artist
+            },
+            urlType: 'spotify'
+          });
+        } else {
+          res.status(400).json({
+            success: false,
+            message: 'No track information found',
+            code: 'TRACK_INFO_ERROR'
+          });
+        }
+      } catch (error) {
+        res.status(400).json({
+          success: false,
+          message: error.message,
+          code: 'SPOTIFY_ERROR'
+        });
+      }
     } else {
       res.status(400).json({
         success: false,
-        message: videoInfo.error || 'Could not get video information',
-        code: videoInfo.code || 'VIDEO_INFO_ERROR'
+        message: 'Unsupported URL format. Please provide a YouTube or Spotify URL.',
+        code: 'UNSUPPORTED_URL'
       });
     }
   } catch (error) {
@@ -883,7 +935,7 @@ app.get('/api/playlist-info', rateLimitMiddleware(apiRateLimiter), async (req, r
 });
 
 /**
- * API endpoint to download and extract audio from single video
+ * API endpoint to download and extract audio from single video or Spotify track
  */
 app.post('/api/download', rateLimitMiddleware(downloadRateLimiter, 'Download limit exceeded. Please wait before trying again.'), async (req, res) => {
   try {
@@ -920,16 +972,60 @@ app.post('/api/download', rateLimitMiddleware(downloadRateLimiter, 'Download lim
       status: 'starting'
     });
 
-    // Perform the download
-    const result = await extractAudio(url, {
-      outputPath: process.cwd(),
-      audioFormat: 'mp3',
-      audioQuality: audioQuality,
-      maxRetries: 2,
-      onProgress: (progress) => {
-        progressTracker.updateProgress(downloadId, progress);
+    // Detect URL type and handle accordingly
+    const urlType = detectURLType(url);
+    let result;
+
+    if (urlType === 'youtube') {
+      // Handle YouTube URL
+      const cleanURL = validateAndSanitizeYouTubeURL(url);
+      result = await extractAudio(cleanURL, {
+        outputPath: process.cwd(),
+        audioFormat: 'mp3',
+        audioQuality: audioQuality,
+        maxRetries: 2,
+        onProgress: (progress) => {
+          progressTracker.updateProgress(downloadId, progress);
+        }
+      });
+    } else if (urlType === 'spotify') {
+      // Handle Spotify URL
+      const cleanURL = validateAndSanitizeSpotifyURL(url);
+      const spotifyHandler = new SpotifyHandler();
+      
+      // Extract track info
+      progressTracker.updateProgress(downloadId, { status: 'extracting_metadata' });
+      const trackInfo = await spotifyHandler.extractTrackInfo(cleanURL);
+      
+      if (trackInfo.tracks && trackInfo.tracks.length > 0) {
+        const track = trackInfo.tracks[0];
+        
+        // Search for YouTube equivalent
+        progressTracker.updateProgress(downloadId, { status: 'searching_youtube' });
+        const youtubeUrl = await findBestYouTubeMatch(track);
+        
+        // Download from YouTube
+        progressTracker.updateProgress(downloadId, { status: 'downloading' });
+        result = await extractAudio(youtubeUrl, {
+          outputPath: process.cwd(),
+          audioFormat: 'mp3',
+          audioQuality: audioQuality,
+          maxRetries: 2,
+          customFilename: `${track.title} - ${track.artist}`,
+          onProgress: (progress) => {
+            progressTracker.updateProgress(downloadId, progress);
+          }
+        });
+      } else {
+        throw new Error('No track information found in Spotify URL');
       }
-    });
+    } else {
+      return res.status(400).json({
+        success: false,
+        message: 'Unsupported URL format. Please provide a YouTube or Spotify URL.',
+        code: 'UNSUPPORTED_URL'
+      });
+    }
 
     if (result.success) {
       progressTracker.completeDownload(downloadId, result);
@@ -939,7 +1035,8 @@ app.post('/api/download', rateLimitMiddleware(downloadRateLimiter, 'Download lim
         message: 'Audio extracted successfully',
         filename: result.filename,
         outputPath: result.outputPath,
-        downloadId
+        downloadId,
+        urlType
       });
     } else {
       progressTracker.failDownload(downloadId, result.message);

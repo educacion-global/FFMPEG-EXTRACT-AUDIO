@@ -237,14 +237,75 @@ export function generateSafeFilename(url) {
 }
 
 /**
+ * Create a safe filename from video title and metadata
+ * @param {string} title - Video title
+ * @param {string} artist - Artist/uploader name (optional)
+ * @param {string} videoId - Video ID (optional, for fallback)
+ * @returns {string} - Safe filename
+ */
+export function createSafeFilename(title, artist = null, videoId = null) {
+  let filename = '';
+  
+  if (title) {
+    // Start with the title
+    filename = sanitizeFilename(title);
+    
+    // Add artist if available and different from title
+    if (artist && !title.toLowerCase().includes(artist.toLowerCase())) {
+      filename += ` - ${sanitizeFilename(artist)}`;
+    }
+  } else if (artist) {
+    // Fallback to artist if no title
+    filename = sanitizeFilename(artist);
+  } else if (videoId) {
+    // Last resort: use video ID
+    filename = `video_${videoId}`;
+  } else {
+    // Final fallback
+    filename = `download_${Date.now()}`;
+  }
+  
+  // Ensure filename isn't too long
+  const maxLength = 200;
+  if (filename.length > maxLength) {
+    filename = filename.substring(0, maxLength).trim();
+  }
+  
+  return filename;
+}
+
+/**
+ * Sanitize filename to be safe for filesystem
+ * @param {string} filename - Original filename
+ * @returns {string} - Sanitized filename
+ */
+export function sanitizeFilename(filename) {
+  if (!filename || typeof filename !== 'string') {
+    return 'untitled';
+  }
+  
+  return filename
+    // Replace invalid characters with underscores
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_')
+    // Replace multiple spaces/underscores with single ones
+    .replace(/[\s_]+/g, '_')
+    // Remove leading/trailing underscores and spaces
+    .replace(/^[_\s]+|[_\s]+$/g, '')
+    // Ensure we have something
+    || 'untitled';
+}
+
+/**
  * File naming templates for different formats
  */
 export const NAMING_TEMPLATES = {
-  DEFAULT: '{title} [{id}]',
-  ARTIST_TITLE: '{uploader} - {title}',
-  DATE_TITLE: '{upload_date} - {title}',
-  DURATION_TITLE: '{title} ({duration}s)',
+  DEFAULT: '{title}',
+  TITLE_ARTIST: '{title} - {uploader}',
+  TITLE_ID: '{title} [{id}]',
+  TITLE_DATE: '{title} ({upload_date})',
+  TITLE_DURATION: '{title} ({duration}s)',
   PLAYLIST_INDEX: '{playlist_index:02d}. {title}',
+  ARTIST_TITLE: '{uploader} - {title}', // Keep for backward compatibility
   CUSTOM: '{custom}'
 };
 
@@ -494,4 +555,126 @@ export function validateApiInput(data, schema) {
     isValid: errors.length === 0,
     errors
   };
+}
+
+/**
+ * Validates if a URL is a valid Spotify URL
+ * @param {string} url - The URL to validate
+ * @returns {boolean} - True if valid Spotify URL, false otherwise
+ */
+export function isValidSpotifyURL(url) {
+  if (!url || typeof url !== 'string') {
+    return false;
+  }
+
+  // Security check: Reject excessively long URLs
+  if (url.length > 2000) {
+    return false;
+  }
+
+  // Security check: Basic malicious pattern detection
+  const maliciousPatterns = [
+    /javascript:/i,
+    /data:/i,
+    /vbscript:/i,
+    /<script/i,
+    /onload=/i,
+    /onerror=/i
+  ];
+
+  if (maliciousPatterns.some(pattern => pattern.test(url))) {
+    return false;
+  }
+
+  try {
+    const urlObj = new URL(url.trim());
+    
+    // Security check: Only allow HTTPS
+    if (urlObj.protocol !== 'https:') {
+      return false;
+    }
+
+    // Check for Spotify domain
+    if (urlObj.hostname !== 'open.spotify.com') {
+      return false;
+    }
+
+    // Validate Spotify URL pattern: /track/ID, /playlist/ID, /album/ID, /artist/ID
+    const spotifyPattern = /^\/(?:track|playlist|album|artist)\/[a-zA-Z0-9]{22}$/;
+    return spotifyPattern.test(urlObj.pathname);
+  } catch (error) {
+    return false;
+  }
+}
+
+/**
+ * Parses a Spotify URL to extract type and ID
+ * @param {string} url - The Spotify URL to parse
+ * @returns {Object} - Object with type and id properties
+ */
+export function parseSpotifyURL(url) {
+  if (!isValidSpotifyURL(url)) {
+    throw new ValidationError('Invalid Spotify URL format');
+  }
+
+  try {
+    const urlObj = new URL(url);
+    const pathParts = urlObj.pathname.split('/');
+    
+    if (pathParts.length !== 3) {
+      throw new ValidationError('Invalid Spotify URL path structure');
+    }
+
+    const type = pathParts[1]; // track, playlist, album, artist
+    const id = pathParts[2];
+
+    return { type, id };
+  } catch (error) {
+    throw new ValidationError('Failed to parse Spotify URL: ' + error.message);
+  }
+}
+
+/**
+ * Validates and sanitizes a Spotify URL
+ * @param {string} url - The URL to process
+ * @returns {string} - Clean, validated Spotify URL
+ */
+export function validateAndSanitizeSpotifyURL(url) {
+  if (!url) {
+    throw new ValidationError('URL is required', 'url');
+  }
+
+  if (typeof url !== 'string') {
+    throw new ValidationError('URL must be a string', 'url');
+  }
+
+  const trimmedUrl = url.trim();
+  
+  if (!trimmedUrl) {
+    throw new ValidationError('URL cannot be empty', 'url');
+  }
+
+  if (!isValidSpotifyURL(trimmedUrl)) {
+    throw new ValidationError(
+      'Invalid Spotify URL. Please provide a valid Spotify track, playlist, album, or artist URL.',
+      'url'
+    );
+  }
+
+  return trimmedUrl;
+}
+
+/**
+ * Determines if a URL is YouTube or Spotify
+ * @param {string} url - The URL to check
+ * @returns {string} - 'youtube', 'spotify', or 'unknown'
+ */
+export function detectURLType(url) {
+  if (isValidYouTubeURL(url)) {
+    return 'youtube';
+  }
+  if (isValidSpotifyURL(url)) {
+    return 'spotify';
+  }
+  return 'unknown';
 }

@@ -35,6 +35,15 @@ export class NetworkError extends Error {
   }
 }
 
+export class ProcessingError extends Error {
+  constructor(message, code = 'PROCESSING_ERROR', details = {}) {
+    super(message);
+    this.name = 'ProcessingError';
+    this.code = code;
+    this.details = details;
+  }
+}
+
 /**
  * Enhanced error handler with user-friendly messages
  */

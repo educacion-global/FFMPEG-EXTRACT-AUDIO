@@ -1,6 +1,6 @@
 import { exec } from 'child_process';
 import { promisify } from 'util';
-import { validateAndSanitizeYouTubeURL, generateSafeFilename } from './utils.js';
+import { validateAndSanitizeYouTubeURL, generateSafeFilename, createSafeFilename } from './utils.js';
 import { 
   YouTubeDownloadError, 
   DependencyError, 
@@ -39,8 +39,35 @@ export async function extractAudio(url, options = {}) {
     const cleanURL = validateAndSanitizeYouTubeURL(url);
     console.log(`✅ URL validated successfully`);
 
-    // Generate filename
-    const baseFilename = customFilename || generateSafeFilename(cleanURL);
+    // Get video information for better filename generation
+    let videoTitle = null;
+    let videoUploader = null;
+    let videoId = null;
+    
+    try {
+      console.log(`🔍 Getting video information for better filename...`);
+      const videoInfo = await getVideoInfo(cleanURL);
+      if (videoInfo.success) {
+        videoTitle = videoInfo.title;
+        videoUploader = videoInfo.uploader;
+        videoId = videoInfo.id;
+        console.log(`✅ Video info retrieved: "${videoTitle}" by ${videoUploader}`);
+      } else {
+        console.log(`⚠️ Could not get video info, using fallback naming`);
+      }
+    } catch (infoError) {
+      console.log(`⚠️ Video info retrieval failed, using fallback naming:`, infoError.message);
+    }
+
+    // Generate filename - prioritize custom name, then video title, then fallback
+    let baseFilename;
+    if (customFilename) {
+      baseFilename = customFilename;
+    } else {
+      baseFilename = createSafeFilename(videoTitle, videoUploader, videoId);
+    }
+    
+    console.log(`📁 Using filename: ${baseFilename}.${audioFormat}`);
     
     // Execute download with retry logic
     const result = await retryManager.executeWithRetry(async () => {
@@ -160,7 +187,7 @@ export async function extractPlaylistAudio(url, options = {}) {
             outputPath,
             audioFormat,
             audioQuality,
-            baseFilename: generateSafeFilename(video.title, video.id)
+            baseFilename: createSafeFilename(video.title, video.uploader, video.id)
           });
         });
 
